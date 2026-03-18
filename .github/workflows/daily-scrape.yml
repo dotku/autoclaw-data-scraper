@@ -1,0 +1,102 @@
+name: Daily Trade Data Scraper
+
+on:
+  schedule:
+    # Run daily at 6:00 AM UTC (10 PM PST)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      use_playwright:
+        description: "Use Playwright for JS-rendered scraping"
+        type: boolean
+        default: true
+      skip_enrich:
+        description: "Skip Apollo enrichment"
+        type: boolean
+        default: false
+      skip_llm:
+        description: "Skip LLM analysis"
+        type: boolean
+        default: false
+      skip_ecommerce:
+        description: "Skip e-commerce platform scraping"
+        type: boolean
+        default: false
+      skip_outreach:
+        description: "Skip outreach email generation"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: autoclaw-data-scraper/package-lock.json
+
+      - name: Install dependencies
+        working-directory: autoclaw-data-scraper
+        run: npm ci
+
+      - name: Install Playwright browsers
+        if: ${{ github.event.inputs.use_playwright != 'false' }}
+        working-directory: autoclaw-data-scraper
+        run: npx playwright install chromium --with-deps
+
+      - name: Run scraper
+        working-directory: autoclaw-data-scraper
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+        run: |
+          FLAGS=""
+          if [ "${{ github.event.inputs.use_playwright }}" != "false" ]; then
+            FLAGS="$FLAGS --use-playwright"
+          fi
+          if [ "${{ github.event.inputs.skip_enrich }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-enrich"
+          fi
+          if [ "${{ github.event.inputs.skip_llm }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-llm"
+          fi
+          if [ "${{ github.event.inputs.skip_ecommerce }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-ecommerce"
+          fi
+          if [ "${{ github.event.inputs.skip_outreach }}" = "true" ]; then
+            FLAGS="$FLAGS --skip-outreach"
+          fi
+          npx tsx src/main.ts $FLAGS
+
+      - name: Upload scraped data as artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scrape-data-${{ github.run_number }}
+          path: autoclaw-data-scraper/data/
+          retention-days: 90
+
+      - name: Commit data to repo
+        working-directory: autoclaw-data-scraper
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --staged --quiet; then
+            echo "No new data to commit"
+          else
+            DATE=$(date +%Y-%m-%d)
+            git commit -m "chore: daily scrape data ${DATE}"
+            git push
+          fi
