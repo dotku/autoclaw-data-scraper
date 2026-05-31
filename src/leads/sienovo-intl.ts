@@ -23,6 +23,7 @@ import {
   type CompanySearchFilters,
 } from "../scrapers/apollo.js";
 import { writeLeads, writeManifest } from "../storage/resource-library.js";
+import { domainSearch } from "../scrapers/hunter.js";
 
 export const CLIENT = "sienovo-intl";
 
@@ -117,6 +118,12 @@ const PAGES_PER_SEGMENT = 2;
 const PER_PAGE = 25;
 const ENRICH_TOP_N = 8;
 
+// Hunter email resolution: Apollo masks emails, so we use Hunter domain-search
+// to get verified decision-maker emails. Capped per run to protect the credit
+// budget (free tier is small; ~1 credit per domain, returns several emails).
+const HUNTER_MAX_LOOKUPS = Number(process.env.HUNTER_MAX_LOOKUPS ?? 15);
+const HUNTER_MIN_CONFIDENCE = 90; // only keep high-confidence (deliverable) emails
+
 interface Lead {
   name: string;
   domain: string;
@@ -178,7 +185,7 @@ function toCSV(leads: Lead[]): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function runSegment(seg: Segment, enrich: boolean, today: string) {
+async function runSegment(seg: Segment, enrich: boolean, today: string, hunterBudget: { remaining: number }) {
   console.log(`\n=== Task: ${seg.key} (${seg.label}) ===`);
   const raw: { name: string; domain: string; linkedinUrl: string; apolloId: string }[] = [];
   for (let page = 1; page <= PAGES_PER_SEGMENT; page++) {
@@ -204,13 +211,30 @@ async function runSegment(seg: Segment, enrich: boolean, today: string) {
         lead.country = org.country;
         lead.description = org.description;
       }
-      const contacts = await findContacts(lead.name, seg.titles, 3);
-      lead.contacts = contacts.map((c) => ({
+      // Apollo finds the right people but masks emails — keep as fallback.
+      lead.contacts = (await findContacts(lead.name, seg.titles, 3)).map((c) => ({
         name: `${c.firstName} ${c.lastName}`.trim(),
         title: c.title,
         email: c.email,
         linkedinUrl: c.linkedinUrl,
       }));
+
+      // Resolve VERIFIED emails via Hunter (budget-capped to protect credits).
+      if (process.env.HUNTER_API_KEY && lead.domain && hunterBudget.remaining > 0) {
+        hunterBudget.remaining--;
+        const hits = (await domainSearch(lead.domain, { limit: 6 })).filter(
+          (e) => e.email && e.confidence >= HUNTER_MIN_CONFIDENCE
+        );
+        if (hits.length) {
+          lead.contacts = hits.slice(0, 4).map((e) => ({
+            name: `${e.firstName} ${e.lastName}`.trim(),
+            title: e.position || "",
+            email: e.email,
+            linkedinUrl: e.linkedin || "",
+          }));
+          console.log(`    ✉ ${lead.domain}: ${hits.length} verified emails (Hunter, ${hunterBudget.remaining} lookups left)`);
+        }
+      }
       await sleep(1200);
     }
   }
@@ -238,8 +262,10 @@ export async function runLeadTasks(opts: { only?: string; enrich?: boolean; toda
     : SEGMENTS;
   if (segments.length === 0) throw new Error(`No segment matches "${opts.only}"`);
 
+  // Shared across segments so one run never exceeds the Hunter credit cap.
+  const hunterBudget = { remaining: enrich ? HUNTER_MAX_LOOKUPS : 0 };
   const summary = [];
-  for (const seg of segments) summary.push(await runSegment(seg, enrich, opts.today));
+  for (const seg of segments) summary.push(await runSegment(seg, enrich, opts.today, hunterBudget));
 
   const manifest = { client: CLIENT, generatedAt: new Date().toISOString(), segments: summary };
   await writeManifest(CLIENT, opts.today, manifest);

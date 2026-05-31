@@ -4,3 +4,4 @@ data/*.json
 data/*.csv
 .env
 .env.local
+resource-library/
