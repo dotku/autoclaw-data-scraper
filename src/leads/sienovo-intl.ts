@@ -24,6 +24,7 @@ import {
 } from "../scrapers/apollo.js";
 import { writeLeads, writeManifest } from "../storage/resource-library.js";
 import { domainSearch } from "../scrapers/hunter.js";
+import { scrapeSignals } from "../scrapers/firecrawl.js";
 
 export const CLIENT = "sienovo-intl";
 
@@ -124,6 +125,10 @@ const ENRICH_TOP_N = 8;
 const HUNTER_MAX_LOOKUPS = Number(process.env.HUNTER_MAX_LOOKUPS ?? 15);
 const HUNTER_MIN_CONFIDENCE = 90; // only keep high-confidence (deliverable) emails
 
+// Firecrawl ICP fit-scoring: scrape each top company's site for edge-AI domain
+// signals → fit score. Budget-capped (1 scrape ≈ 1 credit).
+const FIRECRAWL_MAX_LOOKUPS = Number(process.env.FIRECRAWL_MAX_LOOKUPS ?? 15);
+
 interface Lead {
   name: string;
   domain: string;
@@ -135,6 +140,8 @@ interface Lead {
   estimatedRevenue?: string;
   country?: string;
   description?: string;
+  fitScore?: number; // ICP fit 0-100 (Firecrawl signal density)
+  signals?: string[]; // matched edge-AI domain signals
   contacts?: { name: string; title: string; email: string; linkedinUrl: string }[];
   source: string;
   collectedAt: string;
@@ -169,15 +176,15 @@ function clean(raw: { name: string; domain: string; linkedinUrl: string; apolloI
 
 function toCSV(leads: Lead[]): string {
   const cols = [
-    "name", "domain", "industry", "employeeCount", "estimatedRevenue", "country",
-    "linkedinUrl", "contactName", "contactTitle", "contactEmail",
+    "name", "domain", "fitScore", "industry", "employeeCount", "estimatedRevenue", "country",
+    "signals", "linkedinUrl", "contactName", "contactTitle", "contactEmail",
   ];
   const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const rows = leads.map((l) => {
     const c = l.contacts?.[0];
     return [
-      l.name, l.domain, l.industry, l.employeeCount, l.estimatedRevenue, l.country,
-      l.linkedinUrl, c?.name, c?.title, c?.email,
+      l.name, l.domain, l.fitScore, l.industry, l.employeeCount, l.estimatedRevenue, l.country,
+      (l.signals || []).join("; "), l.linkedinUrl, c?.name, c?.title, c?.email,
     ].map(esc).join(",");
   });
   return [cols.join(","), ...rows].join("\n");
@@ -185,7 +192,7 @@ function toCSV(leads: Lead[]): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function runSegment(seg: Segment, enrich: boolean, today: string, hunterBudget: { remaining: number }) {
+async function runSegment(seg: Segment, enrich: boolean, today: string, hunterBudget: { remaining: number }, firecrawlBudget: { remaining: number }) {
   console.log(`\n=== Task: ${seg.key} (${seg.label}) ===`);
   const raw: { name: string; domain: string; linkedinUrl: string; apolloId: string }[] = [];
   for (let page = 1; page <= PAGES_PER_SEGMENT; page++) {
@@ -235,6 +242,17 @@ async function runSegment(seg: Segment, enrich: boolean, today: string, hunterBu
           console.log(`    ✉ ${lead.domain}: ${hits.length} verified emails (Hunter, ${hunterBudget.remaining} lookups left)`);
         }
       }
+
+      // ICP fit score from edge-AI domain signals on the company site (Firecrawl).
+      if (process.env.FIRECRAWL_API_KEY && lead.domain && firecrawlBudget.remaining > 0) {
+        firecrawlBudget.remaining--;
+        const sig = await scrapeSignals(lead.domain);
+        if (sig.scraped) {
+          lead.fitScore = sig.fitScore;
+          lead.signals = sig.matched;
+          console.log(`    ◎ ${lead.domain}: fit ${sig.fitScore} [${sig.matched.slice(0, 5).join(", ")}]`);
+        }
+      }
       await sleep(1200);
     }
   }
@@ -262,10 +280,11 @@ export async function runLeadTasks(opts: { only?: string; enrich?: boolean; toda
     : SEGMENTS;
   if (segments.length === 0) throw new Error(`No segment matches "${opts.only}"`);
 
-  // Shared across segments so one run never exceeds the Hunter credit cap.
+  // Shared across segments so one run never exceeds the API credit caps.
   const hunterBudget = { remaining: enrich ? HUNTER_MAX_LOOKUPS : 0 };
+  const firecrawlBudget = { remaining: enrich ? FIRECRAWL_MAX_LOOKUPS : 0 };
   const summary = [];
-  for (const seg of segments) summary.push(await runSegment(seg, enrich, opts.today, hunterBudget));
+  for (const seg of segments) summary.push(await runSegment(seg, enrich, opts.today, hunterBudget, firecrawlBudget));
 
   const manifest = { client: CLIENT, generatedAt: new Date().toISOString(), segments: summary };
   await writeManifest(CLIENT, opts.today, manifest);
