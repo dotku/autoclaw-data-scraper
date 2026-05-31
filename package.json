@@ -7,16 +7,21 @@
     "scrape": "tsx src/main.ts",
     "scrape:importyeti": "tsx src/main.ts --source importyeti",
     "scrape:playwright": "tsx src/main.ts --source importyeti --use-playwright",
+    "leads:sienovo-intl": "tsx src/leads/sienovo-intl.ts",
+    "build:lambda": "node scripts/build-lambda.mjs",
     "test": "tsx src/main.ts --dry-run",
     "install:browsers": "npx playwright install chromium"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.21.0",
     "cheerio": "^1.0.0",
-    "playwright": "^1.49.0",
-    "@google/generative-ai": "^0.21.0"
+    "playwright": "^1.49.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1057.0",
+    "@aws-sdk/client-ssm": "^3.1057.0",
     "@types/node": "^22.0.0",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }

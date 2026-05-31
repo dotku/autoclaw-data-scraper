@@ -74,11 +74,12 @@ async function apolloFetch(
  * Search Apollo for a company by name and enrich with firmographic data.
  */
 export async function enrichCompany(
-  companyName: string
+  companyName: string,
+  domain?: string
 ): Promise<ApolloCompany | null> {
   try {
     const data = await apolloFetch("/organizations/enrich", {
-      domain: null,
+      domain: domain || null,
       name: companyName,
     });
 
@@ -107,6 +108,49 @@ export async function enrichCompany(
 }
 
 /**
+ * Search Apollo for companies matching an ICP (keywords + size + location).
+ * This is the lead-discovery entry point: finds NEW companies from scratch,
+ * unlike enrichCompany() which looks up a company you already know by name.
+ *
+ * Apollo's search results are lightweight (name + domain); full firmographics
+ * come from a follow-up enrichCompany() call (which costs more credits).
+ */
+export interface CompanySearchFilters {
+  keywordTags?: string[]; // q_organization_keyword_tags
+  employeeRanges?: string[]; // e.g. ["11,50","51,200"]
+  locations?: string[]; // e.g. ["United States","Germany"]
+  page?: number;
+  perPage?: number;
+}
+
+export async function searchCompanies(
+  filters: CompanySearchFilters
+): Promise<{ name: string; domain: string; linkedinUrl: string; apolloId: string }[]> {
+  const body: Record<string, unknown> = {
+    page: filters.page ?? 1,
+    per_page: filters.perPage ?? 25,
+  };
+  if (filters.keywordTags?.length) body.q_organization_keyword_tags = filters.keywordTags;
+  if (filters.employeeRanges?.length)
+    body.organization_num_employees_ranges = filters.employeeRanges;
+  if (filters.locations?.length) body.organization_locations = filters.locations;
+
+  try {
+    const data = await apolloFetch("/mixed_companies/search", body);
+    const orgs = (data.organizations as Record<string, unknown>[]) || [];
+    return orgs.map((o) => ({
+      name: (o.name as string) || "",
+      domain: (o.primary_domain as string) || ((o.website_url as string) || ""),
+      linkedinUrl: (o.linkedin_url as string) || "",
+      apolloId: (o.id as string) || "",
+    }));
+  } catch (err) {
+    console.warn("[Apollo] Company search failed:", err);
+    return [];
+  }
+}
+
+/**
  * Search for key contacts (decision makers) at a company.
  */
 export async function findContacts(
@@ -115,7 +159,7 @@ export async function findContacts(
   maxResults = 5
 ): Promise<ApolloContact[]> {
   try {
-    const data = await apolloFetch("/mixed_people/search", {
+    const data = await apolloFetch("/mixed_people/api_search", {
       q_organization_name: companyName,
       person_titles: titles,
       page: 1,

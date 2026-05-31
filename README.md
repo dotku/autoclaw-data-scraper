@@ -18,6 +18,11 @@ GitHub Actions (daily cron)
   → Data saved to /data + uploaded as artifact
 ```
 
+Full architecture docs live in [`docs/`](docs/):
+
+- [Current architecture (As-Is)](docs/architecture-current.md) — how the system runs today
+- [Architecture design (To-Be)](docs/architecture-design.md) — enterprise-grade target + roadmap
+
 ## Setup
 
 ### 1. Install dependencies
